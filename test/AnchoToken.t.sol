@@ -12,7 +12,7 @@ contract AnchoTokenTest is Test {
     function setUp() public {
         // deploy token with owner
         vm.prank(owner);
-        token = new AnchoToken(owner);
+        // token = new AnchoToken(owner);
     }
 
     function test_InitialState() public {
