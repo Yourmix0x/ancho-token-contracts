@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import {VRFCoordinatorV2Interface} from "@chainlink/contracts/src/v0.8/vrf/interfaces/VRFCoordinatorV2Interface.sol";
 import {VRFConsumerBaseV2} from "@chainlink/contracts/src/v0.8/vrf/VRFConsumerBaseV2.sol";
+import {VRFCoordinatorV2Interface} from "@chainlink/contracts/src/v0.8/vrf/interfaces/VRFCoordinatorV2Interface.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -13,30 +13,41 @@ contract Lottery is VRFConsumerBaseV2, Ownable {
     uint64 public subscriptionId;
     uint32 public callbackGasLimit = 100000;
     uint16 public requestConfirmations = 3;
-    
+
     // lottery state
-    enum LotteryState { OPEN, DRAWING, CLOSED }
+    enum LotteryState {
+        OPEN,
+        DRAWING,
+        CLOSED
+    }
     LotteryState public state;
-    
+
     // lottery configuration
     uint256 public constant PRIZE_CAP = 7_000_000 * 10 ** 18; // 7M tokens
     uint256 public constant PRIZE_PERCENTAGE = 25; // 25%
-    
-    // token and vault references
+    uint256 public constant MIN_TOKEN_HOLDING = 777 * 10 ** 18; // Hold 777 tokens to enter
+
+    // token references
     IERC20 public anchoToken;
     address public drawVault;
-    
+
     // current draw information
     uint256 public currentDrawId;
     uint256 public currentPrizePool;
     address[] public currentParticipants;
-    mapping(uint256 => address) public drawWinners; // drawId -> winner
-    
+
+    mapping(uint256 => address) public drawWinners;
+    mapping(uint256 => uint256) public requestToDrawId;
+
     // events
-    event LotteryDrawStarted(uint256 drawId, uint256 prizePool, uint256 participantCount);
+    event LotteryDrawStarted(
+        uint256 drawId,
+        uint256 prizePool,
+        uint256 participantCount
+    );
     event LotteryDrawCompleted(uint256 drawId, address winner, uint256 prize);
-    event RandomnessRequested(uint256 requestId, uint256 drawId);
-    
+    event ParticipantAdded(address participant);
+
     constructor(
         address vrfCoordinator,
         bytes32 _keyHash,
@@ -52,105 +63,126 @@ contract Lottery is VRFConsumerBaseV2, Ownable {
         drawVault = _drawVault;
         state = LotteryState.CLOSED;
     }
-    
-    // start a new lottery draw - can be called by anyone on scheduled dates
+
+    // users enter lottery by calling this function
+    function enterLottery() external {
+        require(state == LotteryState.OPEN, "Lottery not open for entries");
+        require(
+            anchoToken.balanceOf(msg.sender) >= MIN_TOKEN_HOLDING,
+            "Hold at least 777 tokens"
+        );
+
+        // prevent duplicate entries
+        for (uint256 i = 0; i < currentParticipants.length; i++) {
+            if (currentParticipants[i] == msg.sender) {
+                revert("Already entered this draw");
+            }
+        }
+
+        currentParticipants.push(msg.sender);
+        emit ParticipantAdded(msg.sender);
+    }
+
+    // start draw on scheduled dates
     function startDraw() external {
         require(state == LotteryState.CLOSED, "Lottery already in progress");
         require(isDrawDate(), "Not a valid draw date");
-        
+        require(currentParticipants.length >= 1, "No participants");
+
         // calculate prize pool - min(vault × 25 %, 7 M)
         uint256 vaultBalance = anchoToken.balanceOf(drawVault);
         uint256 prizePool = (vaultBalance * PRIZE_PERCENTAGE) / 100;
         if (prizePool > PRIZE_CAP) {
             prizePool = PRIZE_CAP;
         }
-        
+
         require(prizePool > 0, "No funds available for draw");
-        
-        // take snapshot of token holders (simplified - we'll enhance this)
-        // for now, we'll assume we have a way to get participants
+        require(
+            anchoToken.allowance(drawVault, address(this)) >= prizePool,
+            "Insufficient allowance"
+        );
+
         currentDrawId++;
         currentPrizePool = prizePool;
         state = LotteryState.DRAWING;
-        
-        // request randomness from chainlink VRF
+
+        // request randomness from Chainlink VRF
         uint256 requestId = COORDINATOR.requestRandomWords(
             keyHash,
             subscriptionId,
             requestConfirmations,
             callbackGasLimit,
-            1 // number of random words
+            1
         );
-        
-        emit LotteryDrawStarted(currentDrawId, prizePool, currentParticipants.length);
-        emit RandomnessRequested(requestId, currentDrawId);
+
+        requestToDrawId[requestId] = currentDrawId;
+
+        emit LotteryDrawStarted(
+            currentDrawId,
+            prizePool,
+            currentParticipants.length
+        );
     }
-    
-    // chainlink VRF callback function
-    function fulfillRandomWords(uint256 requestId, uint256[] memory randomWords) internal override {
+
+    // chainlink VRF callback
+    function fulfillRandomWords(
+        uint256 requestId,
+        uint256[] memory randomWords
+    ) internal override {
         require(state == LotteryState.DRAWING, "Lottery not in drawing state");
-        
+
+        uint256 drawId = requestToDrawId[requestId];
+        require(drawId == currentDrawId, "Draw ID mismatch");
+
         if (currentParticipants.length == 0) {
-            // no participants, refund to vault
             state = LotteryState.CLOSED;
             return;
         }
-        
-        // select winner using randomness
+
+        // select random winner
         uint256 winnerIndex = randomWords[0] % currentParticipants.length;
         address winner = currentParticipants[winnerIndex];
-        
+
         // transfer prize to winner
-        anchoToken.transferFrom(drawVault, winner, currentPrizePool);
-        
+        require(
+            anchoToken.transferFrom(drawVault, winner, currentPrizePool),
+            "Prize transfer failed"
+        );
+
         // record winner
         drawWinners[currentDrawId] = winner;
-        
+
         emit LotteryDrawCompleted(currentDrawId, winner, currentPrizePool);
-        
+
         // reset for next draw
         delete currentParticipants;
         state = LotteryState.CLOSED;
     }
-    
-    // check if today is a valid draw date (7th, 17th, 27th)
+
+    // date checking
     function isDrawDate() public view returns (bool) {
-        (uint year, uint month, uint day) = timestampToDate(block.timestamp);
-        
+        uint256 day = (block.timestamp / 1 days + 4) % 30; // +4 adjusts for Jan 1, 1970 being Thursday
         return (day == 7 || day == 17 || day == 27);
     }
-    
-    // helper function to extract date from timestamp
-    function timestampToDate(uint timestamp) public pure returns (uint year, uint month, uint day) {
-        // simplified date calculation - in production, use a proper library
-        // this is a basic implementation for testing
-        uint256 _days = timestamp / 1 days;
-        
-        year = 1970 + _days / 365;
-        month = (_days % 365) / 30 + 1;
-        day = (_days % 30) + 1;
-        
-        // note: This is simplified. For production, use a proper date library
+
+    // admin functions
+    function openLottery() external onlyOwner {
+        require(state == LotteryState.CLOSED, "Lottery not closed");
+        state = LotteryState.OPEN;
     }
-    
-    // add participant (simplified - we'll enhance with NFT logic later)
-    function addParticipant(address participant) external onlyOwner {
-        currentParticipants.push(participant);
-    }
-    
-    // emergency function to cancel draw
+
     function emergencyCancel() external onlyOwner {
         require(state == LotteryState.DRAWING, "No active draw to cancel");
-        state = LotteryState.CLOSED;
         delete currentParticipants;
+        state = LotteryState.CLOSED;
     }
-    
-    // configuration functions
-    function setCallbackGasLimit(uint32 _callbackGasLimit) external onlyOwner {
-        callbackGasLimit = _callbackGasLimit;
+
+    // view functions
+    function getParticipantCount() external view returns (uint256) {
+        return currentParticipants.length;
     }
-    
-    function setSubscriptionId(uint64 _subscriptionId) external onlyOwner {
-        subscriptionId = _subscriptionId;
+
+    function getCurrentParticipants() external view returns (address[] memory) {
+        return currentParticipants;
     }
 }
