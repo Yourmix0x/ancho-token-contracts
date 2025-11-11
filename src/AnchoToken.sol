@@ -3,9 +3,7 @@ pragma solidity ^0.8.19;
 
 // import OpenZeppelin contracts
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {
-    ERC20Pausable
-} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Pausable.sol";
+import {ERC20Pausable} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Pausable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 contract AnchoToken is ERC20, ERC20Pausable, Ownable {
@@ -20,16 +18,33 @@ contract AnchoToken is ERC20, ERC20Pausable, Ownable {
     address public drawVault;
 
     // events for transparency
-    event TaxRateUpdated(uint256 newTakRate);
+    event TaxRateUpdated(uint256 newTaxRate);
     event TaxDistributed(uint256 treasuryAmount, uint256 drawVaultAmount);
+
+    // governance addresses
+    address public timelock;
+    address public emergencyAdmin;
+
+    // safety features
+    bool public circuitBreakerActive;
+    mapping(address => bool) public blacklisted;
+
+    // governance events
+    event CircuitBreakerActivated(address indexed by);
+    event CircuitBreakerDeactivated(address indexed by);
+    event AddressBlacklisted(address indexed account);
+    event AddressUnblacklisted(address indexed account);
+
     constructor(
         address initialOwner,
         address _treasuryWallet,
-        address _drawVault
+        address _drawVault,
+        address _emergencyAdmin
     ) ERC20("AnchoToken", "ANCHO") Ownable(initialOwner) {
         // set tax destinations
         treasuryWallet = _treasuryWallet;
         drawVault = _drawVault;
+        emergencyAdmin = _emergencyAdmin;
 
         // mint the entire supply to the owner
         _mint(initialOwner, MAX_SUPPLY);
@@ -41,6 +56,10 @@ contract AnchoToken is ERC20, ERC20Pausable, Ownable {
         address to,
         uint256 value
     ) internal override(ERC20, ERC20Pausable) {
+        // safety checks
+        require(!circuitBreakerActive, "Circuit breaker active");
+        require(!blacklisted[from] && !blacklisted[to], "Address blacklisted");
+
         // no tax applied in these cases:
         // - minting (from is zero address)
         // - burning (to is zero address)
@@ -66,7 +85,12 @@ contract AnchoToken is ERC20, ERC20Pausable, Ownable {
     }
 
     // function to update tax rate - adjustable up to 3%
-    function setTaxRate(uint256 newTaxRate) external onlyOwner {
+    // Enhanced with timelock requirement - FROM PRD REQUIREMENT #6
+    function setTaxRate(uint256 newTaxRate) external {
+        require(
+            msg.sender == owner() || msg.sender == timelock,
+            "Only owner or timelock"
+        );
         require(newTaxRate <= MAX_TAX, "Tax rate too high");
         taxRate = newTaxRate;
         emit TaxRateUpdated(newTaxRate);
@@ -78,5 +102,60 @@ contract AnchoToken is ERC20, ERC20Pausable, Ownable {
 
     function unpause() external onlyOwner {
         _unpause();
+    }
+
+    // governance functions
+
+    /**
+     * @notice set the timelock contract address
+     * @dev only owner can set this, timelock will then control sensitive functions
+     */
+    function setTimelock(address _timelock) external onlyOwner {
+        timelock = _timelock;
+    }
+
+    /**
+     * @notice emergency circuit breaker function
+     * @dev can be activated by owner or emergency admin in case of emergency
+     * pauses all transfers and activates circuit breaker mode
+     */
+    function activateCircuitBreaker() external {
+        require(
+            msg.sender == owner() || msg.sender == emergencyAdmin,
+            "Only owner or emergency admin"
+        );
+        circuitBreakerActive = true;
+        _pause(); // Also pause all transfers
+        emit CircuitBreakerActivated(msg.sender);
+    }
+
+    /**
+     * @notice deactivate circuit breaker
+     * @dev only owner can deactivate circuit breaker
+     */
+    function deactivateCircuitBreaker() external onlyOwner {
+        circuitBreakerActive = false;
+        _unpause();
+        emit CircuitBreakerDeactivated(msg.sender);
+    }
+
+    /**
+     * @notice blacklist an address to prevent transfers
+     * @dev only owner can blacklist addresses - for MEV/bot protection
+     * @param account the address to blacklist
+     */
+    function blacklistAddress(address account) external onlyOwner {
+        blacklisted[account] = true;
+        emit AddressBlacklisted(account);
+    }
+
+    /**
+     * @notice remove an address from blacklist
+     * @dev only owner can unblacklist addresses
+     * @param account the address to remove from blacklist
+     */
+    function unblacklistAddress(address account) external onlyOwner {
+        blacklisted[account] = false;
+        emit AddressUnblacklisted(account);
     }
 }
