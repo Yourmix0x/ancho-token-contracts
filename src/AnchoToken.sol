@@ -12,14 +12,23 @@ contract AnchoToken is ERC20, ERC20Pausable, Ownable {
     // tax configuration
     uint256 public constant MAX_TAX = 300; // 3% in basis points (100 = 1%)
     uint256 public taxRate = 200; // 2% in basis point
+    uint256 public reflectionRate = 50; // 0.5% reflection rate in basis points
 
     // tax destination
     address public treasuryWallet;
     address public drawVault;
 
+    // reflection mechanism
+    uint256 private _reflectionTotal;
+    uint256 private _totalSupply;
+    mapping(address => uint256) private _reflectionBalances;
+    mapping(address => bool) public excludedFromReflection;
+
     // events for transparency
     event TaxRateUpdated(uint256 newTaxRate);
     event TaxDistributed(uint256 treasuryAmount, uint256 drawVaultAmount);
+    event ReflectionDistributed(uint256 reflectionAmount);
+    event ReflectionRateUpdated(uint256 newReflectionRate);
 
     // governance addresses
     address public timelock;
@@ -46,11 +55,21 @@ contract AnchoToken is ERC20, ERC20Pausable, Ownable {
         drawVault = _drawVault;
         emergencyAdmin = _emergencyAdmin;
 
+        // initialize reflection mechanism
+        _totalSupply = MAX_SUPPLY;
+        _reflectionTotal = (~uint256(0) - (~uint256(0) % _totalSupply));
+
+        // exclude system addresses from reflection to prevent issues
+        excludedFromReflection[_treasuryWallet] = true;
+        excludedFromReflection[_drawVault] = true;
+        excludedFromReflection[address(this)] = true;
+
         // mint the entire supply to the owner
         _mint(initialOwner, MAX_SUPPLY);
+        _reflectionBalances[initialOwner] = _reflectionTotal;
     }
 
-    // override the _update function to apply tax on transfers
+    // override the _update function to apply tax and reflection on transfers
     function _update(
         address from,
         address to,
@@ -60,32 +79,42 @@ contract AnchoToken is ERC20, ERC20Pausable, Ownable {
         require(!circuitBreakerActive, "Circuit breaker active");
         require(!blacklisted[from] && !blacklisted[to], "Address blacklisted");
 
-        // no tax applied in these cases:
+        // no tax/reflection applied in these cases:
         // - minting (from is zero address)
         // - burning (to is zero address)
-        // - transfers to/from treasury or vault (avoid double taxation)
-        if (from == address(0) || to == address(0) || taxRate == 0) {
+        if (from == address(0) || to == address(0)) {
             super._update(from, to, value);
             return;
         }
 
-        // calculate tax amount - 2% tax
-        uint256 taxAmount = (value * taxRate) / 10000;
-        uint256 transferAmount = value - taxAmount;
+        // calculate fees
+        uint256 taxAmount = (value * taxRate) / 10000; // 2% tax
+        uint256 reflectionAmount = (value * reflectionRate) / 10000; // 0.5% reflection
+        uint256 totalFees = taxAmount + reflectionAmount;
+        uint256 transferAmount = value - totalFees;
 
-        // transfer the amount minus tax to recipient
+        // apply reflection to all holders (burns from total reflection supply)
+        if (reflectionAmount > 0 && _reflectionTotal > 0) {
+            _reflectionTotal -=
+                (_reflectionTotal * reflectionAmount) /
+                _totalSupply;
+            emit ReflectionDistributed(reflectionAmount);
+        }
+
+        // transfer the amount minus fees to recipient
         super._update(from, to, transferAmount);
 
         // distribute tax - 1% to each destination
-        uint256 halfTax = taxAmount / 2;
-        super._update(from, treasuryWallet, halfTax);
-        super._update(from, drawVault, taxAmount - halfTax); // handle odd numbers
-
-        emit TaxDistributed(halfTax, taxAmount - halfTax);
+        if (taxAmount > 0) {
+            uint256 halfTax = taxAmount / 2;
+            super._update(from, treasuryWallet, halfTax);
+            super._update(from, drawVault, taxAmount - halfTax);
+            emit TaxDistributed(halfTax, taxAmount - halfTax);
+        }
     }
 
     // function to update tax rate - adjustable up to 3%
-    // Enhanced with timelock requirement - FROM PRD REQUIREMENT #6
+    // Enhanced with timelock requirement
     function setTaxRate(uint256 newTaxRate) external {
         require(
             msg.sender == owner() || msg.sender == timelock,
@@ -157,5 +186,57 @@ contract AnchoToken is ERC20, ERC20Pausable, Ownable {
     function unblacklistAddress(address account) external onlyOwner {
         blacklisted[account] = false;
         emit AddressUnblacklisted(account);
+    }
+
+    // ===== REFLECTION FUNCTIONS =====
+
+    /**
+     * @notice set reflection rate (0.5% default)
+     * @dev only owner or timelock can change this
+     */
+    function setReflectionRate(uint256 newReflectionRate) external {
+        require(
+            msg.sender == owner() || msg.sender == timelock,
+            "Only owner or timelock"
+        );
+        require(newReflectionRate <= 100, "Max 1% reflection rate"); // Max 1%
+        reflectionRate = newReflectionRate;
+        emit ReflectionRateUpdated(newReflectionRate);
+    }
+
+    /**
+     * @notice exclude an address from receiving reflections
+     * @dev useful for exchanges, contracts that shouldn't earn reflections
+     */
+    function excludeFromReflection(address account) external onlyOwner {
+        excludedFromReflection[account] = true;
+    }
+
+    /**
+     * @notice include an address in reflections again
+     */
+    function includeInReflection(address account) external onlyOwner {
+        excludedFromReflection[account] = false;
+    }
+
+    /**
+     * @notice get reflection balance for testing/display purposes
+     * @dev in a full implementation, you'd override balanceOf to show reflected balance
+     */
+    function getReflectionBalance(
+        address account
+    ) external view returns (uint256) {
+        if (excludedFromReflection[account] || _totalSupply == 0) {
+            return super.balanceOf(account);
+        }
+        return (_reflectionBalances[account] * _totalSupply) / _reflectionTotal;
+    }
+
+    /**
+     * @notice get current reflection rate for UI display
+     */
+    function getCurrentReflectionRate() external view returns (uint256) {
+        if (_totalSupply == 0 || _reflectionTotal == 0) return 0;
+        return ((_reflectionTotal * 10000) / _totalSupply) - 10000; // rate of increase
     }
 }

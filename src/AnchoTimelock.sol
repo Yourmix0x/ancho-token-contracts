@@ -33,6 +33,14 @@ contract AnchoTimelock is Ownable {
         return operationId;
     }
 
+    function scheduleReflectionRateChange(
+        uint256 newReflectionRate
+    ) external onlyOwner returns (bytes32) {
+        bytes32 operationId = keccak256(abi.encode("setReflectionRate", newReflectionRate));
+        _scheduleOperation(operationId);
+        return operationId;
+    }
+
     function executeTaxChange(
         address token,
         uint256 newTaxRate
@@ -59,6 +67,20 @@ contract AnchoTimelock is Ownable {
             abi.encodeWithSignature("setBridgeActive(bool)", active)
         );
         require(success, "Bridge status change execution failed");
+    }
+
+    function executeReflectionRateChange(
+        address token,
+        uint256 newReflectionRate
+    ) external onlyOwner {
+        bytes32 operationId = keccak256(abi.encode("setReflectionRate", newReflectionRate));
+        _executeOperation(operationId);
+
+        // interface for token contract
+        (bool success, ) = token.call(
+            abi.encodeWithSignature("setReflectionRate(uint256)", newReflectionRate)
+        );
+        require(success, "Reflection rate change execution failed");
     }
 
     function cancelOperation(bytes32 operationId) external onlyOwner {
