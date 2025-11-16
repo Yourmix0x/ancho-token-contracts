@@ -9,12 +9,13 @@ contract TokenTaxTest is Test {
     address public owner = makeAddr("owner");
     address public treasury = makeAddr("treasury");
     address public vault = makeAddr("vault");
+    address public emergencyAdmin = makeAddr("emergencyAdmin");
     address public user1 = makeAddr("user1");
     address public user2 = makeAddr("user2");
     
     function setUp() public {
         vm.prank(owner);
-        token = new AnchoToken(owner, treasury, vault);
+        token = new AnchoToken(owner, treasury, vault, emergencyAdmin);
         
         // give some tokens to user1 for testing transfers
         vm.prank(owner);

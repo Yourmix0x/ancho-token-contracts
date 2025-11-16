@@ -12,13 +12,14 @@ contract BridgeTest is Test {
     address public owner = makeAddr("owner");
     address public treasury = makeAddr("treasury");
     address public vault = makeAddr("vault");
+    address public emergencyAdmin = makeAddr("emergencyAdmin");
     address public user1 = makeAddr("user1");
     address public user2 = makeAddr("user2");
     
     function setUp() public {
         // deploy token
         vm.prank(owner);
-        token = new AnchoToken(owner, treasury, vault);
+        token = new AnchoToken(owner, treasury, vault, emergencyAdmin);
         
         // deploy bridge
         vm.prank(owner);

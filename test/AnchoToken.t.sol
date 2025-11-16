@@ -7,12 +7,15 @@ import {AnchoToken} from "../src/AnchoToken.sol";
 contract AnchoTokenTest is Test {
     AnchoToken public token;
     address public owner = makeAddr("Owner");
+    address public treasury = makeAddr("treasury");
+    address public vault = makeAddr("vault");
+    address public emergencyAdmin = makeAddr("emergencyAdmin");
     address public user1 = makeAddr("user1");
 
     function setUp() public {
         // deploy token with owner
         vm.prank(owner);
-        // token = new AnchoToken(owner);
+        token = new AnchoToken(owner, treasury, vault, emergencyAdmin);
     }
 
     function test_InitialState() public {
